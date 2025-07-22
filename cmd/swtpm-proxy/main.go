@@ -7,7 +7,7 @@ import (
 	"os"
 	"strconv"
 
-	swtpmproxy "github.com/andreluis034/swtpm-proxy-shim"
+	swtpmproxy "github.com/abrandao-census/swtpm-proxy-shim"
 )
 
 func usage() {

@@ -1,4 +1,4 @@
-module github.com/andreluis034/swtpm-proxy-shim
+module github.com/abrandao-census/swtpm-proxy-shim
 
 go 1.23.0
 
