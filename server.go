@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"syscall"
+	"time"
 
 	"github.com/mdlayher/vsock"
 )
@@ -20,6 +21,13 @@ type BackendType int
 const (
 	BackendIP BackendType = iota
 	BackendVsock
+)
+
+type BackendChannel int
+
+const (
+	BackendChannelControl BackendChannel = iota
+	BackendChannelData
 )
 
 type ConnChannelProxy struct {
@@ -41,6 +49,8 @@ type SwtpmProxyOptions struct {
 
 	BackendControlPort uint16 // Port for backend control connection
 	BackendDataPort    uint16 // Port for backend data connection
+
+	BackendControlRetryCount int // Number of retries for backend control connection
 }
 
 type SwtpmProxy struct {
@@ -117,15 +127,8 @@ func (p *SwtpmProxy) handleQemuSetFd(backendControl io.ReadWriteCloser, qemuCont
 		return nil, fmt.Errorf("received an invalid file descriptor from qemu: %d", fd)
 	}
 
-	var backendDataConn io.ReadWriteCloser
-	switch p.Options.BackendType {
-	case BackendIP:
-		backendDataConn, err = net.Dial("tcp", net.JoinHostPort(p.Options.BackendAddress, fmt.Sprintf("%d", p.Options.BackendDataPort)))
-	case BackendVsock:
-		backendDataConn, err = vsock.Dial(p.Options.BackendCid, uint32(p.Options.BackendDataPort), nil)
-	default:
-		err = fmt.Errorf("no backend data address specified")
-	}
+	backendDataConn, err := p.dialBackend(BackendChannelData)
+
 	if err != nil {
 		qemuDataChan.Close()
 		return nil, fmt.Errorf("failed dialing to backend data channel: %w", err)
@@ -142,6 +145,54 @@ func (p *SwtpmProxy) handleQemuSetFd(backendControl io.ReadWriteCloser, qemuCont
 			qemuConn:    qemuDataChan,
 		},
 	}, nil
+}
+
+func (p *SwtpmProxy) dialBackend(channel BackendChannel) (io.ReadWriteCloser, error) {
+	var backendConn io.ReadWriteCloser
+	var err error
+
+	port := p.Options.BackendControlPort
+	if channel == BackendChannelData {
+		port = p.Options.BackendDataPort
+	}
+
+	switch p.Options.BackendType {
+	case BackendIP:
+		backendConn, err = net.Dial("tcp", net.JoinHostPort(p.Options.BackendAddress, fmt.Sprintf("%d", port)))
+	case BackendVsock:
+		backendConn, err = vsock.Dial(p.Options.BackendCid, uint32(port), nil)
+	default:
+		err = fmt.Errorf("no backend control address specified")
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("failed dialing to backend control channel: %w", err)
+	}
+
+	return backendConn, nil
+}
+
+func (p *SwtpmProxy) dialBackendWithRetry(channel BackendChannel, maxRetries int, retryDelay time.Duration) (io.ReadWriteCloser, error) {
+	var lastErr error
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			fmt.Printf("Retrying backend connection (attempt %d/%d) in %v...\n", attempt+1, maxRetries, retryDelay)
+			time.Sleep(retryDelay)
+		}
+
+		conn, err := p.dialBackend(channel)
+		if err == nil {
+			if attempt > 0 {
+				fmt.Printf("Successfully connected to backend after %d retries\n", attempt)
+			}
+			return conn, nil
+		}
+
+		lastErr = err
+	}
+
+	return nil, fmt.Errorf("failed to connect to backend after %d attempts: %w", maxRetries, lastErr)
 }
 
 func (p *SwtpmProxy) Start() error {
@@ -169,18 +220,13 @@ func (p *SwtpmProxy) Start() error {
 			continue
 		}
 
-		var swtpmControlConn io.ReadWriteCloser
-		switch p.Options.BackendType {
-		case BackendIP:
-			swtpmControlConn, err = net.Dial("tcp", net.JoinHostPort(p.Options.BackendAddress, fmt.Sprintf("%d", p.Options.BackendControlPort)))
-		case BackendVsock:
-			swtpmControlConn, err = vsock.Dial(p.Options.BackendCid, uint32(p.Options.BackendControlPort), nil)
-		default:
-			err = fmt.Errorf("unsupported backend type")
-		}
+		// Retry control channel connection for TPM-VM boot delay
+		fmt.Println("Connecting to backend control channel...")
+		swtpmControlConn, err := p.dialBackendWithRetry(BackendChannelControl, p.Options.BackendControlRetryCount, 2*time.Second)
+
 		if err != nil {
 			clientConn.Close()
-			return fmt.Errorf("failed dialing to backend control channel: %w", err)
+			return fmt.Errorf("failed dialing to backend control channel after retries: %w", err)
 		}
 		fmt.Println("New connection established, handling QEMU setfd command...")
 

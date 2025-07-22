@@ -11,7 +11,7 @@ import (
 )
 
 func usage() {
-	fmt.Fprintf(os.Stderr, "Usage: %s --type <vsock|tcp> --control-port <port> [--data-port <port>] <listen-socket> <host> \n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "Usage: %s --type <vsock|tcp> --control-port <port> [--data-port <port>] [--control-retry-count <count>] <listen-socket> <host> \n", os.Args[0])
 	os.Exit(1)
 }
 
@@ -22,11 +22,10 @@ func main() {
 	connType := flag.String("type", "", "Connection type: vsock or tcp")
 	controlPort := flag.Int("control-port", 0, "Control port number")
 	dataPort := flag.Int("data-port", 0, "Data port number (optional)")
+	controlRetryCount := flag.Int("control-retry-count", 10, "Control retry count (optional)")
 
 	flag.Usage = usage
 	flag.Parse()
-
-	fmt.Printf("Flags: type=%s, control-port=%d, data-port=%d\n", *connType, *controlPort, *dataPort)
 
 	switch *connType {
 	case "vsock":
@@ -68,6 +67,9 @@ func main() {
 	case swtpmproxy.BackendIP:
 		options.BackendAddress = args[1]
 	}
+	options.BackendControlRetryCount = *controlRetryCount
+
+	fmt.Printf("Flags: type=%s, control-port=%d, data-port=%d, control-retry-count=%d\n", *connType, *controlPort, *dataPort, *controlRetryCount)
 	fmt.Printf("Control Socket Path: %s, Backend Address: %s Cid: %d\n", options.ControlSocketPath, options.BackendAddress, options.BackendCid)
 	startProxy(options)
 }
